@@ -9,4 +9,5 @@ contextBridge.exposeInMainWorld('electron', {
   openLabelFileDialog: () => ipcRenderer.invoke('openLabelFileDialog'),
   readLabelFile: (path) => ipcRenderer.invoke('readLabelFile', path),
   showItemInFolder: (path) => ipcRenderer.invoke('showItemInFolder', path),
+  deleteImageAndTxt: (imagePath, txtPath) => ipcRenderer.invoke('deleteImageAndTxt', imagePath, txtPath),
 });

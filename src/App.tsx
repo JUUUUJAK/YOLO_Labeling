@@ -17,6 +17,7 @@ declare global {
       openLabelFileDialog: () => Promise<string | null>;
       readLabelFile: (path: string) => Promise<string>;
       showItemInFolder: (path: string) => Promise<void>;
+      deleteImageAndTxt: (imagePath: string, txtPath: string) => Promise<{ ok: boolean; error?: string }>;
     };
   }
 }
@@ -380,6 +381,29 @@ const App: React.FC = () => {
     setCurrentIndex((i) => i + 1);
   }, [currentIndex, imageList.length, saveCurrent]);
 
+  const handleDeleteCurrentImage = useCallback(async () => {
+    if (!window.electron || !displayItem) return;
+    const msg = `현재 이미지와 해당 라벨 파일을 삭제할까요?\n이 작업은 되돌릴 수 없습니다.\n\n${displayItem.name}`;
+    if (!window.confirm(msg)) return;
+    const result = await window.electron.deleteImageAndTxt(displayItem.imagePath, displayItem.txtPath);
+    if (!result.ok) {
+      setStatusMessage('삭제 실패: ' + (result.error || '알 수 없음'));
+      return;
+    }
+    const nextList = imageList.filter((item) => item.imagePath !== displayItem!.imagePath);
+    setImageList(nextList);
+    if (nextList.length === 0) {
+      setDisplayItem(null);
+      setDisplayAnnotations([]);
+      setCurrentIndex(0);
+      setStatusMessage('이미지와 라벨 파일이 삭제되었습니다.');
+      return;
+    }
+    const nextIndex = currentIndex >= nextList.length ? nextList.length - 1 : currentIndex;
+    setCurrentIndex(nextIndex);
+    setStatusMessage(`삭제됨: ${displayItem.name}`);
+  }, [displayItem, imageList, currentIndex]);
+
   const goPrevRef = useRef(goPrev);
   const goNextRef = useRef(goNext);
   const handleUpdateAnnotationsRef = useRef(handleUpdateAnnotations);
@@ -596,12 +620,20 @@ const App: React.FC = () => {
           </div>
           <button type="button" onClick={() => handleUpdateAnnotations(displayAnnotations)} className="px-3.5 py-2 rounded-xl text-sm font-medium transition-all border border-[var(--accent-lime)]/50 shadow-[0_0_20px_rgba(168,230,27,0.2)] hover:shadow-[0_0_24px_rgba(168,230,27,0.3)]" style={{ backgroundColor: 'var(--accent-lime)', color: '#1A1A2E' }}>저장 (Ctrl+S)</button>
           {displayItem && window.electron && (
-            <button type="button" onClick={() => window.electron!.showItemInFolder(displayItem.imagePath)} className="px-3.5 py-2 rounded-xl glass border border-white/10 text-sm font-medium transition-all hover:border-[var(--accent-blue)] hover:shadow-[0_0_20px_rgba(82,182,255,0.15)]" style={{ color: 'var(--accent-blue)' }} title="현재 이미지 폴더를 탐색기에서 열기">
-              <span className="inline-flex items-center gap-1.5">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2-2z" /></svg>
-                폴더 열기
-              </span>
-            </button>
+            <>
+              <button type="button" onClick={() => window.electron!.showItemInFolder(displayItem.imagePath)} className="px-3.5 py-2 rounded-xl glass border border-white/10 text-sm font-medium transition-all hover:border-[var(--accent-blue)] hover:shadow-[0_0_20px_rgba(82,182,255,0.15)]" style={{ color: 'var(--accent-blue)' }} title="현재 이미지 폴더를 탐색기에서 열기">
+                <span className="inline-flex items-center gap-1.5">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2-2z" /></svg>
+                  폴더 열기
+                </span>
+              </button>
+              <button type="button" onClick={handleDeleteCurrentImage} className="px-3.5 py-2 rounded-xl glass border border-white/10 text-sm font-medium transition-all hover:bg-red-500/20 hover:border-red-400/50 hover:text-red-400" title="현재 이미지와 라벨 파일 삭제">
+                <span className="inline-flex items-center gap-1.5">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                  이미지 삭제
+                </span>
+              </button>
+            </>
           )}
           {imageList.length > 0 && (
             <button type="button" onClick={() => setShowStatsModal(true)} className="px-3.5 py-2 rounded-xl glass border border-white/10 text-sm font-medium transition-all hover:border-[var(--accent-purple)] hover:shadow-[0_0_20px_rgba(176,142,212,0.2)]" style={{ color: 'var(--accent-purple)' }} title="폴더 내 객체 통계">

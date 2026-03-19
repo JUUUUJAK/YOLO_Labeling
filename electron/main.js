@@ -10,6 +10,16 @@ const IMAGE_EXT = ['.jpg', '.jpeg', '.png', '.webp', '.bmp'];
 let mainWindow = null;
 let workspaceRoot = null;
 
+/** Windows: 긴 경로·괄호 포함 경로 오류 방지를 위해 확장 경로(\\?\ ) 사용 */
+function toLongPath(filePath) {
+  if (process.platform !== 'win32' || !filePath || typeof filePath !== 'string') return filePath;
+  const normalized = path.normalize(filePath.trim());
+  if (path.isAbsolute(normalized) && !normalized.startsWith('\\\\?\\')) {
+    return '\\\\?\\' + normalized;
+  }
+  return normalized;
+}
+
 function getIconPath() {
   const candidates = [
     path.join(__dirname, '..', 'public', 'logo.ico'),
@@ -113,14 +123,26 @@ ipcMain.handle('scanFolder', (_, dirPath) => {
 });
 
 ipcMain.handle('readTxt', (_, filePath) => {
-  if (!filePath || !fs.existsSync(filePath)) return '';
-  return fs.readFileSync(filePath, 'utf-8');
+  if (!filePath) return '';
+  const p = toLongPath(filePath);
+  try {
+    if (!fs.existsSync(p)) return '';
+    return fs.readFileSync(p, 'utf-8');
+  } catch (e) {
+    console.error(e);
+    return '';
+  }
 });
 
 ipcMain.handle('writeTxt', (_, filePath, content) => {
   if (!filePath) return false;
   try {
-    fs.writeFileSync(filePath, content || '', 'utf-8');
+    const p = toLongPath(filePath);
+    const dir = path.dirname(p);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch (_) { /* dir may already exist */ }
+    fs.writeFileSync(p, content || '', 'utf-8');
     return true;
   } catch (e) {
     console.error(e);
@@ -145,10 +167,31 @@ ipcMain.handle('readLabelFile', (_, filePath) => {
 ipcMain.handle('showItemInFolder', (_, filePath) => {
   if (!filePath || typeof filePath !== 'string') return;
   const normalized = path.normalize(String(filePath).trim());
-  if (fs.existsSync(normalized)) {
-    shell.showItemInFolder(normalized);
-  } else {
-    const dir = path.dirname(normalized);
-    if (fs.existsSync(dir)) shell.openPath(dir);
+  const longPath = toLongPath(normalized);
+  try {
+    if (fs.existsSync(longPath)) {
+      shell.showItemInFolder(normalized);
+    } else {
+      const dir = path.dirname(normalized);
+      if (fs.existsSync(toLongPath(dir))) shell.openPath(dir);
+    }
+  } catch (e) {
+    console.error(e);
+  }
+});
+
+ipcMain.handle('deleteImageAndTxt', (_, imagePath, txtPath) => {
+  if (!imagePath || typeof imagePath !== 'string') return { ok: false, error: 'invalid path' };
+  try {
+    const img = toLongPath(imagePath.trim());
+    if (fs.existsSync(img)) fs.unlinkSync(img);
+    if (txtPath && typeof txtPath === 'string') {
+      const txt = toLongPath(txtPath.trim());
+      if (fs.existsSync(txt)) fs.unlinkSync(txt);
+    }
+    return { ok: true };
+  } catch (e) {
+    console.error(e);
+    return { ok: false, error: (e && e.message) || 'delete failed' };
   }
 });

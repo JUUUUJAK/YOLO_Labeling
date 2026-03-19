@@ -272,12 +272,19 @@ const AnnotationCanvas: React.FC<AnnotationCanvasProps> = ({
           return;
         }
 
-        // Paste: Ctrl + V
+        // Paste: Ctrl + V (같은 위치에 이미 박스가 있으면 그 복사본은 붙여넣지 않음)
         if (key === 'v') {
           e.preventDefault();
           if (clipboardRef.current.length > 0) {
+            const tol = 1e-6;
+            const samePos = (a: BoundingBox, b: BoundingBox) =>
+              Math.abs(a.x - b.x) < tol && Math.abs(a.y - b.y) < tol && Math.abs(a.w - b.w) < tol && Math.abs(a.h - b.h) < tol;
+            const toPaste = clipboardRef.current.filter(
+              box => !localAnnotations.some(existing => samePos(box, existing))
+            );
+            if (toPaste.length === 0) return;
             saveHistory(); // Save before paste
-            const newBoxes = clipboardRef.current.map(box => ({
+            const newBoxes = toPaste.map(box => ({
               ...box,
               id: Math.random().toString(36).substr(2, 9),
               x: box.x,
