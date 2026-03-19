@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import type { BoundingBox, YoloClass } from './types';
 import { COLOR_PALETTE } from './constants';
 import { parseYoloTxt, generateYoloTxt } from './yoloFormat';
@@ -35,6 +36,23 @@ interface FolderStats {
   byClass: { classId: number; name: string; count: number }[];
 }
 
+/** 툴에 저장된 클래스 세트 (txt 내용 + 표시 이름) */
+interface SavedClassSet {
+  id: string;
+  displayName: string;
+  classNames: string[];
+}
+
+const SAVED_SETS_STORAGE_KEY = 'intellivixYolo.savedClassSetsV1';
+
+function classNamesToYoloClasses(classNames: string[]): YoloClass[] {
+  return classNames.map((name, index) => ({
+    id: index,
+    name,
+    color: COLOR_PALETTE[index % COLOR_PALETTE.length],
+  }));
+}
+
 const App: React.FC = () => {
   const [workFolderPath, setWorkFolderPath] = useState<string | null>(null);
   const [imageList, setImageList] = useState<OfflineImageItem[]>([]);
@@ -48,7 +66,20 @@ const App: React.FC = () => {
   const [customClassColors, setCustomClassColors] = useState<Record<number, string>>({});
   const isElectron = typeof window !== 'undefined' && !!window.electron;
 
-  // 화면에 실제로 그리는 항목: 이미지+라벨이 둘 다 준비된 뒤 한 번에 갱신되어 깜빡임 방지
+  const [savedClassSets, setSavedClassSets] = useState<SavedClassSet[]>([]);
+  const [activeClassSetId, setActiveClassSetId] = useState<string | null>(null);
+  const [storageRestored, setStorageRestored] = useState(false);
+  const [labelMenuOpen, setLabelMenuOpen] = useState(false);
+  const [renameId, setRenameId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const labelMenuRef = useRef<HTMLDivElement>(null);
+  const labelTriggerRef = useRef<HTMLButtonElement>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const gotoInputRef = useRef<HTMLInputElement>(null);
+  const [labelDropdownRect, setLabelDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
+  const [gotoValue, setGotoValue] = useState('');
+
+  // 화면에 실제로 그리는 항목
   const [displayItem, setDisplayItem] = useState<OfflineImageItem | null>(null);
   const [displayAnnotations, setDisplayAnnotations] = useState<BoundingBox[]>([]);
 
@@ -63,7 +94,65 @@ const App: React.FC = () => {
     selectedClassRef.current = selectedClass;
   }, [classes, selectedClass]);
 
+  /** 저장소에서 저장된 세트 목록만 복원 (시작 시에는 아무 클래스도 적용하지 않음) */
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(SAVED_SETS_STORAGE_KEY);
+      if (!raw) {
+        setStorageRestored(true);
+        return;
+      }
+      const o = JSON.parse(raw) as {
+        savedClassSets?: SavedClassSet[];
+        customColors?: Record<string, string>;
+      };
+      const sets = Array.isArray(o.savedClassSets) ? o.savedClassSets.filter((s) => s?.id && s?.displayName && Array.isArray(s.classNames)) : [];
+      setSavedClassSets(sets);
+      if (o.customColors && typeof o.customColors === 'object') {
+        const colors: Record<number, string> = {};
+        for (const [k, v] of Object.entries(o.customColors)) {
+          if (typeof v === 'string') colors[Number(k)] = v;
+        }
+        setCustomClassColors(colors);
+      }
+      setStorageRestored(true);
+    } catch {
+      setStorageRestored(true);
+    }
+  }, []);
+
+  /** 세트 목록·선택·색상 변경 시 저장 (복원 완료 후에만) */
+  const persistSavedSets = useCallback(() => {
+    try {
+      localStorage.setItem(
+        SAVED_SETS_STORAGE_KEY,
+        JSON.stringify({
+          savedClassSets,
+          activeClassSetId,
+          customColors: customClassColors,
+        })
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [savedClassSets, activeClassSetId, customClassColors]);
+
+  useEffect(() => {
+    if (!storageRestored) return;
+    persistSavedSets();
+  }, [storageRestored, persistSavedSets]);
+
   const currentItem = imageList[currentIndex] ?? null;
+
+  /** 현재 이미지(캔버스) 기준 클래스별 박스 수 */
+  const classBoxCounts = useMemo(() => {
+    const m = new Map<number, number>();
+    if (!displayAnnotations.length) return m;
+    for (const b of displayAnnotations) {
+      m.set(b.classId, (m.get(b.classId) ?? 0) + 1);
+    }
+    return m;
+  }, [displayAnnotations]);
 
   const loadAnnotationsForIndex = useCallback(async (index: number): Promise<BoundingBox[]> => {
     if (!window.electron || index < 0 || index >= imageList.length) return [];
@@ -111,25 +200,114 @@ const App: React.FC = () => {
     }
   };
 
-  const handleOpenLabelFile = async () => {
+  /** txt 파일을 불러와 새 클래스 세트로 저장하고 적용 */
+  const handleLoadFileAndSave = async () => {
     if (!window.electron) return;
+    setLabelMenuOpen(false);
     try {
       const path = await window.electron.openLabelFileDialog();
       if (!path) return;
       const content = await window.electron.readLabelFile(path);
       const lines = content.split('\n').map((l) => l.trim()).filter(Boolean);
-      const parsed: YoloClass[] = lines.map((name, index) => ({
-        id: index,
-        name,
-        color: COLOR_PALETTE[index % COLOR_PALETTE.length],
-      }));
-      setClasses(parsed);
-      setSelectedClass(parsed[0] ?? null);
-      setStatusMessage(`라벨 파일: ${path} (${parsed.length}개 클래스)`);
+      const displayName = path.replace(/^.*[/\\]/, '').replace(/\.txt$/i, '') || 'classes';
+      const newSet: SavedClassSet = {
+        id: crypto.randomUUID(),
+        displayName,
+        classNames: lines,
+      };
+      setSavedClassSets((prev) => [...prev, newSet]);
+      setActiveClassSetId(newSet.id);
+      const yolo = classNamesToYoloClasses(newSet.classNames);
+      setClasses(yolo);
+      setSelectedClass(yolo[0] ?? null);
+      setStatusMessage(`저장됨: ${newSet.displayName} (${lines.length}개 클래스)`);
     } catch (e) {
       setStatusMessage('라벨 파일 열기 실패: ' + (e as Error).message);
     }
   };
+
+  /** 저장된 세트 선택 시 적용 */
+  const applySavedSet = useCallback((id: string) => {
+    const set = savedClassSets.find((s) => s.id === id);
+    if (!set) return;
+    setLabelMenuOpen(false);
+    setActiveClassSetId(id);
+    const yolo = classNamesToYoloClasses(set.classNames);
+    setClasses(yolo);
+    setSelectedClass(yolo[0] ?? null);
+    setStatusMessage(`적용: ${set.displayName}`);
+  }, [savedClassSets]);
+
+  /** 세트 표시 이름 변경 */
+  const renameSavedSet = useCallback((id: string, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed) return;1
+    setSavedClassSets((prev) => prev.map((s) => (s.id === id ? { ...s, displayName: trimmed } : s)));
+    setRenameId(null);
+    setRenameValue('');
+  }, []);
+
+  /** 세트 삭제 */
+  const removeSavedSet = useCallback((id: string) => {
+    setSavedClassSets((prev) => {
+      const next = prev.filter((s) => s.id !== id);
+      if (activeClassSetId === id) {
+        const first = next[0];
+        if (first) {
+          setActiveClassSetId(first.id);
+          const yolo = classNamesToYoloClasses(first.classNames);
+          setClasses(yolo);
+          setSelectedClass(yolo[0] ?? null);
+        } else {
+          setActiveClassSetId(null);
+          setClasses([]);
+          setSelectedClass(null);
+        }
+      }
+      return next;
+    });
+    setRenameId(null);
+  }, [activeClassSetId]);
+
+  useEffect(() => {
+    if (!labelMenuOpen) return;
+    const close = (e: MouseEvent) => {
+      if (labelMenuRef.current && !labelMenuRef.current.contains(e.target as Node)) setLabelMenuOpen(false);
+    };
+    document.addEventListener('click', close);
+    return () => document.removeEventListener('click', close);
+  }, [labelMenuOpen]);
+
+  useEffect(() => {
+    if (renameId) renameInputRef.current?.focus();
+  }, [renameId]);
+
+  /** Goto 입력값을 현재 인덱스와 동기화 */
+  useEffect(() => {
+    if (imageList.length > 0) setGotoValue(String(currentIndex + 1));
+    else setGotoValue('');
+  }, [currentIndex, imageList.length]);
+
+  /** 드롭다운 열릴 때 트리거 위치 갱신 (portal 위치용) */
+  useEffect(() => {
+    if (!labelMenuOpen || !labelTriggerRef.current) {
+      setLabelDropdownRect(null);
+      return;
+    }
+    const update = () => {
+      if (labelTriggerRef.current) {
+        const rect = labelTriggerRef.current.getBoundingClientRect();
+        setLabelDropdownRect({ top: rect.bottom, left: rect.left, width: rect.width });
+      }
+    };
+    update();
+    window.addEventListener('scroll', update, true);
+    window.addEventListener('resize', update);
+    return () => {
+      window.removeEventListener('scroll', update, true);
+      window.removeEventListener('resize', update);
+    };
+  }, [labelMenuOpen]);
 
   const loadFolderStats = useCallback(async () => {
     if (!window.electron || imageList.length === 0) return;
@@ -206,14 +384,14 @@ const App: React.FC = () => {
   const goNextRef = useRef(goNext);
   const handleUpdateAnnotationsRef = useRef(handleUpdateAnnotations);
   const handleOpenFolderRef = useRef(handleOpenFolder);
-  const handleOpenLabelFileRef = useRef(handleOpenLabelFile);
+  const handleLoadFileAndSaveRef = useRef(handleLoadFileAndSave);
   const currentItemRef = useRef<OfflineImageItem | null>(null);
   const annotationsRef = useRef<BoundingBox[]>([]);
   goPrevRef.current = goPrev;
   goNextRef.current = goNext;
   handleUpdateAnnotationsRef.current = handleUpdateAnnotations;
   handleOpenFolderRef.current = handleOpenFolder;
-  handleOpenLabelFileRef.current = handleOpenLabelFile;
+  handleLoadFileAndSaveRef.current = handleLoadFileAndSave;
   currentItemRef.current = displayItem;
   annotationsRef.current = displayAnnotations;
 
@@ -223,29 +401,38 @@ const App: React.FC = () => {
       const isCtrlS = e.ctrlKey && key === 's';
       if (isCtrlS) e.preventDefault();
 
-      if (e.ctrlKey && e.key === 'o') {
+      if (e.ctrlKey && key === 'o') {
         e.preventDefault();
         e.stopPropagation();
         handleOpenFolderRef.current();
         return;
       }
-      if (e.ctrlKey && e.key === 'l') {
+      if (e.ctrlKey && key === 'l') {
         e.preventDefault();
         e.stopPropagation();
-        handleOpenLabelFileRef.current();
+        handleLoadFileAndSaveRef.current();
         return;
       }
+      if (e.ctrlKey && key === 'g') {
+        e.preventDefault();
+        e.stopPropagation();
+        gotoInputRef.current?.focus();
+        gotoInputRef.current?.select();
+        return;
+      }
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
       if (isCtrlS) {
         if (currentItemRef.current) handleUpdateAnnotationsRef.current(annotationsRef.current);
         return;
       }
-      if (e.key === 'a' || e.key === 'ArrowLeft') {
+      if (key === 'a' || e.key === 'ArrowLeft') {
         e.preventDefault();
         e.stopPropagation();
         goPrevRef.current();
         return;
       }
-      if (e.key === 'd' || e.key === 'ArrowRight') {
+      if (key === 'd' || e.key === 'ArrowRight') {
         e.preventDefault();
         e.stopPropagation();
         goNextRef.current();
@@ -256,7 +443,7 @@ const App: React.FC = () => {
       const curSelected = selectedClassRef.current;
 
       // 백틱: 모든 객체 표시/숨김 토글
-      if (e.key === '`') {
+      if (key === '`') {
         e.preventDefault();
         e.stopPropagation();
         setHiddenClassIds((prev) =>
@@ -305,16 +492,108 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden" style={{ backgroundColor: 'var(--bg-deep)' }}>
-      <header className="glass flex-shrink-0 border-b border-white/10 px-5 py-3 flex items-center gap-4 rounded-none">
+    <div className="h-screen flex flex-col" style={{ backgroundColor: 'var(--bg-deep)' }}>
+      <header className="glass flex-shrink-0 border-b border-white/10 px-5 py-3 flex items-center gap-4 rounded-none overflow-visible">
         <div className="flex items-center gap-2.5">
           <img src={`${import.meta.env.BASE_URL}logo.ico`} alt="" className="w-8 h-8 rounded-xl object-contain ring-1 ring-white/10" />
-          <h1 className="font-bold text-lg tracking-tight text-white">YOLO Label</h1>
-          <span className="text-[10px] font-medium uppercase tracking-wider px-2 py-1 rounded-lg glass border border-white/10" style={{ color: 'var(--accent-purple)' }}>Local</span>
+          <h1 className="font-bold text-base sm:text-lg tracking-tight text-white whitespace-nowrap">INTELLIVIX YOLO</h1>
         </div>
         <div className="flex items-center gap-2">
           <button type="button" onClick={handleOpenFolder} className="px-3.5 py-2 rounded-xl glass border border-white/10 text-sm font-medium transition-all hover:border-[var(--accent-blue)] hover:shadow-[0_0_20px_rgba(82,182,255,0.15)]" style={{ color: 'var(--accent-blue)' }}>폴더 (Ctrl+O)</button>
-          <button type="button" onClick={handleOpenLabelFile} className="px-3.5 py-2 rounded-xl glass border border-white/10 text-sm font-medium transition-all hover:border-[var(--accent-blue)] hover:shadow-[0_0_20px_rgba(82,182,255,0.15)]" style={{ color: 'var(--accent-blue)' }}>라벨 (Ctrl+L)</button>
+          <div className="relative" ref={labelMenuRef}>
+            <button
+              ref={labelTriggerRef}
+              type="button"
+              onClick={() => setLabelMenuOpen((o) => !o)}
+              className="px-3.5 py-2 rounded-xl glass border border-white/10 text-sm font-medium transition-all hover:border-[var(--accent-blue)] hover:shadow-[0_0_20px_rgba(82,182,255,0.15)] inline-flex items-center gap-1.5"
+              style={{ color: 'var(--accent-blue)' }}
+              aria-expanded={labelMenuOpen}
+              aria-haspopup="true"
+              title="클래스 세트 선택"
+            >
+              {savedClassSets.find((s) => s.id === activeClassSetId)?.displayName ?? '클래스 세트'}
+              <svg className={`w-4 h-4 transition-transform ${labelMenuOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+            </button>
+            {labelMenuOpen &&
+              labelDropdownRect &&
+              createPortal(
+                <div
+                  className="fixed py-1 min-w-[240px] max-h-[320px] overflow-auto rounded-xl glass border border-white/10 shadow-2xl bg-slate-900/95 backdrop-blur-xl"
+                  style={{
+                    top: labelDropdownRect.top + 4,
+                    left: labelDropdownRect.left,
+                    zIndex: 99999,
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">저장된 세트</div>
+                  {savedClassSets.length === 0 ? (
+                    <div className="px-4 py-2 text-sm text-slate-500">저장된 세트 없음</div>
+                  ) : (
+                    savedClassSets.map((set) => (
+                      <div
+                        key={set.id}
+                        className={`flex items-center gap-1 px-2 py-1.5 rounded-lg group ${activeClassSetId === set.id ? 'bg-[var(--accent-purple)]/20' : 'hover:bg-white/10'}`}
+                      >
+                        {renameId === set.id ? (
+                          <input
+                            ref={renameInputRef}
+                            type="text"
+                            value={renameValue}
+                            onChange={(e) => setRenameValue(e.target.value)}
+                            onBlur={() => renameSavedSet(set.id, renameValue)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') renameSavedSet(set.id, renameValue);
+                              if (e.key === 'Escape') { setRenameId(null); setRenameValue(''); }
+                            }}
+                            className="flex-1 min-w-0 px-2 py-0.5 text-sm bg-slate-800 border border-white/20 rounded text-white"
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => applySavedSet(set.id)}
+                              className="flex-1 min-w-0 text-left text-sm text-slate-200 truncate py-0.5"
+                            >
+                              {set.displayName}
+                              <span className="ml-1 text-slate-500 text-xs">({set.classNames.length})</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); setRenameId(set.id); setRenameValue(set.displayName); }}
+                              className="p-1 rounded text-slate-500 hover:text-white hover:bg-white/10 opacity-0 group-hover:opacity-100 transition-opacity"
+                              title="이름 변경"
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); removeSavedSet(set.id); }}
+                              className="p-1 rounded text-slate-500 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 transition-opacity"
+                              title="삭제"
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    ))
+                  )}
+                  <div className="border-t border-white/10 mt-1 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleLoadFileAndSave}
+                      className="w-full px-4 py-2.5 text-left text-sm text-[var(--accent-blue)] hover:bg-white/10 transition-colors rounded-lg flex items-center gap-2"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                      파일에서 불러와 저장 (Ctrl+L)
+                    </button>
+                  </div>
+                </div>,
+                document.body
+              )}
+          </div>
           <button type="button" onClick={() => handleUpdateAnnotations(displayAnnotations)} className="px-3.5 py-2 rounded-xl text-sm font-medium transition-all border border-[var(--accent-lime)]/50 shadow-[0_0_20px_rgba(168,230,27,0.2)] hover:shadow-[0_0_24px_rgba(168,230,27,0.3)]" style={{ backgroundColor: 'var(--accent-lime)', color: '#1A1A2E' }}>저장 (Ctrl+S)</button>
           {displayItem && window.electron && (
             <button type="button" onClick={() => window.electron!.showItemInFolder(displayItem.imagePath)} className="px-3.5 py-2 rounded-xl glass border border-white/10 text-sm font-medium transition-all hover:border-[var(--accent-blue)] hover:shadow-[0_0_20px_rgba(82,182,255,0.15)]" style={{ color: 'var(--accent-blue)' }} title="현재 이미지 폴더를 탐색기에서 열기">
@@ -342,10 +621,10 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      <div className="flex-1 flex min-h-0">
-        <aside className="glass w-60 flex-shrink-0 border-r border-white/10 overflow-auto flex flex-col">
+      <div className="flex-1 flex min-h-0 overflow-hidden">
+        <aside className="glass w-72 flex-shrink-0 border-r border-white/10 overflow-auto flex flex-col">
           <div className="p-3 pb-2">
-            <div className="text-[10px] font-bold uppercase tracking-widest mb-3 text-slate-400">Classes (1–9)</div>
+            <div className="text-[10px] font-bold uppercase tracking-widest mb-3 text-slate-400">Classes (1-9)</div>
             {classes.length === 0 ? (
               <div className="glass-card p-4 text-center">
                 <p className="text-slate-400 text-sm">라벨 파일을 열어</p>
@@ -386,10 +665,21 @@ const App: React.FC = () => {
                           title="색상 변경"
                         />
                       </div>
-                      <span className={`truncate font-semibold ${hiddenClassIds.includes(c.id) ? 'text-slate-600 line-through' : ''} ${isSelected ? 'text-white' : ''}`}>
-                        {c.name}
+                      <div className="flex items-baseline gap-1.5 min-w-0 flex-1" title={`단축키 ${idx + 1}`}>
+                        <span className={`truncate font-semibold min-w-0 ${hiddenClassIds.includes(c.id) ? 'text-slate-600 line-through' : ''} ${isSelected ? 'text-white' : 'text-slate-200'}`}>
+                          {c.name}
+                        </span>
+                        <span className={`shrink-0 text-[10px] font-mono tabular-nums ${isSelected ? 'text-white/80' : 'text-slate-500'}`}>
+                          {idx + 1}
+                        </span>
+                      </div>
+                      <span
+                        className={`shrink-0 tabular-nums text-xs font-bold leading-none rounded-full px-2 py-0.5 text-right border min-w-[1.35rem] ${(classBoxCounts.get(c.id) ?? 0) > 0 ? 'border-white/25 shadow-[0_0_10px_rgba(168,230,27,0.3)]' : 'text-slate-500 border-transparent'}`}
+                        style={(classBoxCounts.get(c.id) ?? 0) > 0 ? { backgroundColor: 'var(--accent-lime)', color: '#1A1A2E' } : undefined}
+                        title="현재 이미지 박스 수"
+                      >
+                        {classBoxCounts.get(c.id) ?? 0}
                       </span>
-                      <span className={`shrink-0 ml-auto text-[10px] font-mono tabular-nums ${isSelected ? 'text-white/90' : 'text-slate-500'}`}>{idx + 1}</span>
                     </button>
                     <button
                       type="button"
@@ -409,10 +699,32 @@ const App: React.FC = () => {
               </ul>
             )}
           </div>
-          {currentItem && (
+          {imageList.length > 0 && (
             <div className="mt-auto p-3 pt-2 border-t border-white/10">
-              <div className="text-[10px] font-bold uppercase tracking-widest mb-1 text-slate-500">진행</div>
-              <div className="text-sm font-medium tabular-nums" style={{ color: 'var(--accent-purple)' }}>{currentIndex + 1} / {imageList.length}</div>
+              <div className="text-[10px] font-bold uppercase tracking-widest mb-1.5 text-slate-500">Goto (Ctrl+G)</div>
+              <div className="flex items-center gap-2">
+                <input
+                  ref={gotoInputRef}
+                  type="number"
+                  min={1}
+                  max={imageList.length}
+                  value={gotoValue}
+                  onChange={(e) => setGotoValue(e.target.value.replace(/[^0-9]/g, ''))}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const num = Math.min(imageList.length, Math.max(1, parseInt(gotoValue, 10) || 1));
+                      setGotoValue(String(num));
+                      saveCurrent();
+                      setCurrentIndex(num - 1);
+                      gotoInputRef.current?.blur();
+                    }
+                  }}
+                  onBlur={() => setGotoValue(String(currentIndex + 1))}
+                  className="w-16 px-2 py-1.5 text-sm font-mono tabular-nums rounded-lg bg-slate-800 border border-white/10 text-white focus:border-[var(--accent-blue)] focus:ring-1 focus:ring-[var(--accent-blue)] outline-none"
+                  title="이미지 번호 입력 후 Enter"
+                />
+                <span className="text-slate-500 text-sm">/ {imageList.length}</span>
+              </div>
             </div>
           )}
         </aside>

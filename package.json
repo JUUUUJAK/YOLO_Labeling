@@ -29,7 +29,7 @@
   },
   "build": {
     "appId": "com.yololabel.localtool",
-    "productName": "YOLO Label Local",
+    "productName": "INTELLIVIX YOLO",
     "icon": "public/logo.ico",
     "files": [
       "dist/**/*",

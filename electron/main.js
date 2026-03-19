@@ -33,7 +33,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
-    title: 'YOLO Label (Local)',
+    title: 'INTELLIVIX YOLO',
   });
 
   const useDevServer = process.env.ELECTRON_DEV === '1';

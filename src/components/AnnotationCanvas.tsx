@@ -100,6 +100,15 @@ const AnnotationCanvas: React.FC<AnnotationCanvasProps> = ({
   const [isModActive, setIsModActive] = useState(false);
   const [interactionMode, setInteractionMode] = useState<'FAST' | 'CLASSIC'>('FAST');
   const [isDeleteAllConfirmOpen, setIsDeleteAllConfirmOpen] = useState(false);
+  const FLOATING_UI_LS = 'yoloLocaltoolFloatingUiVisible';
+  const [showFloatingUi, setShowFloatingUi] = useState(() =>
+    typeof localStorage !== 'undefined' && localStorage.getItem(FLOATING_UI_LS) === '0' ? false : true
+  );
+  useEffect(() => {
+    try {
+      localStorage.setItem(FLOATING_UI_LS, showFloatingUi ? '1' : '0');
+    } catch { /* ignore */ }
+  }, [showFloatingUi]);
 
   // Track key states for temporary modes
   const isSpacePressedRef = useRef(false);
@@ -223,10 +232,17 @@ const AnnotationCanvas: React.FC<AnnotationCanvasProps> = ({
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const isCtrl = e.ctrlKey || e.metaKey;
+      if (e.key === ']' && !isCtrl) {
+        const t = e.target as HTMLElement;
+        if (t?.tagName === 'INPUT' || t?.tagName === 'TEXTAREA' || t?.isContentEditable) return;
+        e.preventDefault();
+        setShowFloatingUi(prev => !prev);
+        return;
+      }
       if (readOnly) return;
 
       const key = e.key.toLowerCase();
-      const isCtrl = e.ctrlKey || e.metaKey;
 
       if (isCtrl) {
         // Undo: Ctrl + Z
@@ -864,7 +880,6 @@ const AnnotationCanvas: React.FC<AnnotationCanvasProps> = ({
                     }}
                   >
                     <span>{cls?.name}</span>
-                    {box.isAutoLabel && <span>(AI)</span>}
                     {showPixelSizes && imageNaturalSize && (
                       <span
                         className="font-mono text-[0.9em] pl-1.5 ml-0.5"
@@ -940,8 +955,33 @@ const AnnotationCanvas: React.FC<AnnotationCanvasProps> = ({
 
 
 
-        {/* Floating Toolbar (Tools & Zoom) */}
+        {/* Floating Toolbar (Tools & Zoom) — hide/show: ] or top chevron */}
+        {!showFloatingUi && (
+          <div data-no-draw className="absolute top-6 left-6 z-50">
+            <Tooltip text="도구 패널 표시 (])">
+              <button
+                type="button"
+                onClick={() => setShowFloatingUi(true)}
+                className="p-3 rounded-xl shadow-2xl backdrop-blur-md border border-white/10 bg-slate-900/80 text-slate-200 hover:bg-slate-800 hover:text-white transition-all duration-300 hover:scale-105"
+                aria-label="도구 패널 표시"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+              </button>
+            </Tooltip>
+          </div>
+        )}
+        {showFloatingUi && (
         <div data-no-draw className="absolute top-6 left-6 flex flex-col gap-3 z-50">
+          <Tooltip text="도구 패널 숨기기 (])">
+            <button
+              type="button"
+              onClick={() => setShowFloatingUi(false)}
+              className="p-2.5 rounded-xl shadow-2xl backdrop-blur-md border border-white/10 bg-slate-800/70 text-slate-400 hover:text-white hover:bg-slate-700/90 transition-all duration-300"
+              aria-label="도구 패널 숨기기"
+            >
+              <svg className="w-4 h-4 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+            </button>
+          </Tooltip>
           <Tooltip text={activeTool === 'PAN' ? "이미지 조절 (V)" : "박스 생성 (V)"}>
             <button
               onClick={() => setActiveTool(activeTool === 'PAN' ? 'SELECT' : 'PAN')}
@@ -1039,6 +1079,7 @@ const AnnotationCanvas: React.FC<AnnotationCanvasProps> = ({
             </button>
           </Tooltip>
         </div>
+        )}
 
         {/* Settings Overlay */}
         {isSettingsOpen && (
@@ -1120,6 +1161,7 @@ const AnnotationCanvas: React.FC<AnnotationCanvasProps> = ({
                 <div className="space-y-3">
                   <div className="flex justify-between items-center text-sm"><span className="text-slate-400 font-medium">확대</span><span className="text-white font-mono bg-slate-800 px-2 py-1 rounded-lg border border-slate-700 shadow-sm">마우스 휠</span></div>
                   <div className="flex justify-between items-center text-sm"><span className="text-slate-400 font-medium">이미지 이동</span><span className="text-white font-mono bg-slate-800 px-2 py-1 rounded-lg border border-slate-700 shadow-sm text-xs">스페이스바 or 가운데 버튼 + 드래그</span></div>
+                  <div className="flex justify-between items-center text-sm"><span className="text-slate-400 font-medium">캔버스 도구 패널 표시/숨김</span><span className="text-white font-mono bg-slate-800 px-2 py-1 rounded-lg border border-slate-700 shadow-sm">]</span></div>
                   <div className="flex justify-between items-center text-sm"><span className="text-slate-400 font-medium">이미지 이동 토글</span><span className="text-white font-mono bg-slate-800 px-2 py-1 rounded-lg border border-slate-700 shadow-sm">V or 상단 아이콘</span></div>
                   <div className="flex justify-between items-center text-sm"><span className="text-slate-400 font-medium">박스 생성</span><span className="text-white font-mono bg-slate-800 px-2 py-1 rounded-lg border border-slate-700 shadow-sm">클릭 + 드래그</span></div>
                   <div className="flex justify-between text-sm mt-4">
